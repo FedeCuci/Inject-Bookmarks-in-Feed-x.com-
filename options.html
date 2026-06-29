@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Feed Revive — Settings</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 520px;
+        margin: 24px auto;
+        padding: 0 16px;
+        line-height: 1.5;
+      }
+      h1 { font-size: 18px; }
+      label { display: block; margin-top: 14px; font-weight: 600; }
+      input[type="text"], input[type="password"] {
+        width: 100%;
+        padding: 8px;
+        margin-top: 4px;
+        box-sizing: border-box;
+      }
+      .row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+      .row label { margin: 0; }
+      button { margin-top: 18px; padding: 8px 14px; cursor: pointer; }
+      .hint { font-size: 12px; color: #666; margin-top: 4px; }
+      #status { margin-top: 14px; font-size: 13px; min-height: 1.2em; }
+      .ok { color: #168a3b; }
+      .err { color: #c0392b; }
+    </style>
+  </head>
+  <body>
+    <h1>Feed Revive — Obsidian clipping</h1>
+    <p class="hint">
+      Bookmarked tweets are written to your vault via the
+      <b>Local REST API</b> community plugin. In that plugin enable the
+      <b>Non-encrypted (HTTP) Server</b> and copy its API key below.
+    </p>
+
+    <div class="row">
+      <input type="checkbox" id="enabled" />
+      <label for="enabled">Clip bookmarks to Obsidian</label>
+    </div>
+
+    <label for="baseUrl">Local REST API URL</label>
+    <input type="text" id="baseUrl" placeholder="http://127.0.0.1:27123" />
+
+    <label for="apiKey">API key</label>
+    <input type="password" id="apiKey" placeholder="paste from the plugin" />
+
+    <label for="folder">Vault folder for clips</label>
+    <input type="text" id="folder" placeholder="Twitter" />
+    <p class="hint">Notes are saved as <code>folder/handle-tweetid.md</code>.</p>
+
+    <div>
+      <button id="save">Save</button>
+      <button id="test">Test connection</button>
+    </div>
+    <div id="status"></div>
+
+    <script src="options.js"></script>
+  </body>
+</html>

@@ -1,0 +1,118 @@
+/* Revived-post card. Inherits the page's font + text colour so it blends with
+   both X's dark and light themes. Border uses a translucent grey that reads
+   well on either background. */
+
+.feed-revive-card {
+  /* The card is appended INSIDE the host tweet's cell, which already ends with
+     X's own divider — so the line *above* us comes for free. We only draw our
+     own divider at the BOTTOM, exactly like a native tweet, otherwise we'd
+     double the top rule and leave nothing below. Colour is X's theme divider. */
+  border-bottom: 1px solid var(--fr-border, rgba(128, 128, 128, 0.2));
+}
+
+.feed-revive-card .fr-link {
+  display: block;
+  padding: 12px 16px;
+  text-decoration: none;
+  color: inherit;
+  /* X sets its Chirp font only on inner text spans, not the cell container, so
+     `inherit` falls back to the browser default — name the stack explicitly. */
+  font-family: "TwitterChirp", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 20px;
+}
+
+.feed-revive-card .fr-link:hover {
+  background: var(--fr-hover, rgba(128, 128, 128, 0.08));
+}
+
+.feed-revive-card .fr-badge {
+  /* Mirrors X's "<name> reposted" header: 13px bold secondary-grey, icon in the
+     avatar gutter, text indented to line up with the body/name column. The tight
+     line-height keeps the row close to the divider above, like the native label
+     (the card's default 20px line box would push it down a couple px). */
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 16px;
+  color: var(--fr-secondary, rgb(113, 118, 123));
+  margin-bottom: 2px;
+}
+
+.feed-revive-card .fr-badge-icon {
+  /* Same width as the avatar column so the icon sits in the gutter and the
+     label aligns with the name/text below it (40px avatar + 12px row gap). */
+  flex: 0 0 40px;
+  text-align: right;
+  font-size: 15px;
+  /* The ↩ is a text glyph, not a filled SVG like X's retweet icon, so
+     font-weight can't bolden it — stroke its outline in its own colour to give
+     it the same heavy weight as the native icon. */
+  -webkit-text-stroke: 0.6px currentColor;
+}
+
+.feed-revive-card .fr-row {
+  display: flex;
+  gap: 12px;
+}
+
+.feed-revive-card .fr-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  object-fit: cover;
+}
+
+.feed-revive-card .fr-avatar-blank {
+  background: rgba(128, 128, 128, 0.3);
+}
+
+.feed-revive-card .fr-body {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.feed-revive-card .fr-head {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.feed-revive-card .fr-name {
+  font-weight: 700;
+}
+
+.feed-revive-card .fr-handle {
+  /* X's muted-grey handle colour, not just a dimmed copy of the text colour. */
+  color: var(--fr-secondary, rgb(113, 118, 123));
+}
+
+.feed-revive-card .fr-text {
+  margin-top: 2px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+.feed-revive-card .fr-text.fr-clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 8;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.feed-revive-card .fr-more {
+  display: inline-block;
+  margin-top: 2px;
+  color: rgb(29, 155, 240);
+  cursor: pointer;
+}
+
+.feed-revive-card .fr-more:hover {
+  text-decoration: underline;
+}
