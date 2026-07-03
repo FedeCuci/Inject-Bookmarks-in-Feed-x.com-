@@ -188,9 +188,14 @@
               try {
                 let data;
                 if (this.responseType === "json") data = this.response;
-                else if (this.responseType === "" || this.responseType === "text")
-                  data = JSON.parse(this.responseText);
-                else return; // arraybuffer/blob/document — not ours
+                else if (this.responseType === "" || this.responseType === "text") {
+                  // Reading responseText may run the splice getter, which
+                  // parses and harvests the body itself — don't parse twice.
+                  const text = this.responseText;
+                  const info = this.__feedRevive;
+                  if (info && info.processed) return;
+                  data = JSON.parse(text);
+                } else return; // arraybuffer/blob/document — not ours
                 if (data) processGraphql(url, data);
               } catch (_) {
                 /* never break the app */
@@ -259,6 +264,12 @@
     let out = real;
     try {
       const data = JSON.parse(real);
+      // Reuse this parse for the passive tweet harvest too — the load
+      // listener would otherwise JSON.parse the same multi-MB body again.
+      try {
+        processGraphql(info.url, data);
+      } catch (_) {}
+      info.processed = true;
       if (spliceTimeline(data)) out = JSON.stringify(data);
     } catch (_) {}
     info.splicedText = out;

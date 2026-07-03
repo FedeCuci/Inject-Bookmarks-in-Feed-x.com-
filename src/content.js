@@ -206,21 +206,31 @@
     }
   }
 
-  // Debounced: a backfill chunk captures ~25 pages in quick succession, and
-  // each would otherwise rewrite the entire (multi-MB) store.
+  // TRAILING debounce: a backfill chunk delivers a page every ~0.5s for ~30s,
+  // and every store write serializes the whole multi-MB pool — so wait for
+  // the burst to END and write once (with a 30s cap so a very long burst
+  // can't defer persistence forever). A non-trailing debounce here caused
+  // 100%-CPU waves: one full serialization every 1.5s for the whole chunk.
   let persistTimer = null;
+  let persistFirstReq = 0;
   function persist() {
-    if (!storage || persistTimer) return;
+    if (!storage) return;
+    const now = Date.now();
+    if (!persistFirstReq) persistFirstReq = now;
+    if (persistTimer) clearTimeout(persistTimer);
+    const delay = Math.min(5000, Math.max(0, persistFirstReq + 30000 - now));
     persistTimer = setTimeout(() => {
       persistTimer = null;
+      persistFirstReq = 0;
       persistNow();
-    }, 1500);
+    }, delay);
   }
 
   window.addEventListener("pagehide", () => {
     if (persistTimer) {
       clearTimeout(persistTimer);
       persistTimer = null;
+      persistFirstReq = 0;
       persistNow();
     }
   });
