@@ -306,16 +306,29 @@
       }
       const nodes = all.filter((t) => t && t.raw).map((t) => t.raw).slice(0, RAW_MAX);
       spliceActive = enabled && nodes.length > 0;
-      window.postMessage(
-        {
-          __feedReviveCmd: "splicePool",
-          enabled,
-          every: INJECT_EVERY,
-          nodes,
-          pendingClips: res[PENDING_KEY] || [],
-        },
-        location.origin
-      );
+      // Hand the pool over in batches: one postMessage with 3000 raw nodes
+      // structure-clones ~20MB on the main thread right at page load. The
+      // first batch goes immediately (so the first timeline response can
+      // already be spliced); the rest trickle in during idle moments.
+      const CHUNK = 250;
+      const batches = [];
+      for (let i = 0; i < nodes.length; i += CHUNK) batches.push(nodes.slice(i, i + CHUNK));
+      if (!batches.length) batches.push([]);
+      batches.forEach((batch, idx) => {
+        const send = () =>
+          window.postMessage(
+            {
+              __feedReviveCmd: "splicePool",
+              enabled,
+              every: INJECT_EVERY,
+              nodes: batch,
+              pendingClips: idx === 0 ? res[PENDING_KEY] || [] : [],
+            },
+            location.origin
+          );
+        if (idx === 0) send();
+        else setTimeout(send, idx * 250);
+      });
       if (enabled && !nodes.length && all.length) {
         log(
           "stored posts predate real-tweet injection — scroll x.com/i/bookmarks once to re-capture (using fallback cards meanwhile)"
@@ -373,7 +386,11 @@
   // self-healing: if React re-renders the cell and drops our card, the next
   // pass re-appends it.
   function refreshInjections() {
-    if (!isHome()) return;
+    // No DOM work in hidden tabs — nobody can see it, and X mutates its DOM
+    // constantly, so this would otherwise run all day in a pinned tab. (The
+    // 2s interval heals everything as soon as the tab is shown again.
+    // Backfill is NOT gated on visibility — that must keep running.)
+    if (document.hidden || !isHome()) return;
     const cells = document.querySelectorAll('[data-testid="cellInnerDiv"]');
     if (!cells.length) return;
 

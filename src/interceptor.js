@@ -32,6 +32,7 @@
   // captures) plus anything parsed live this session.
   let spliceEnabled = false;
   let spliceEvery = 20; // one spliced tweet per N real timeline entries
+  const POOL_MAX = 3000; // keep in sync with content.js MAX_STORED
   const splicePool = []; // raw Tweet nodes, oldest-added first
   const splicePoolIds = new Set();
   const sessionSpliced = new Set(); // don't repeat a tweet until pool exhausted
@@ -323,6 +324,14 @@
     if (!node || !node.rest_id || splicePoolIds.has(node.rest_id)) return;
     splicePoolIds.add(node.rest_id);
     splicePool.push(node);
+    // The content script's pool is capped (MAX_STORED); ours must not
+    // outgrow it — during a long backfill session this would otherwise
+    // accumulate every node ever captured, tens of MB that never shrink.
+    if (splicePool.length > POOL_MAX) {
+      const dropped = splicePool.shift();
+      splicePoolIds.delete(dropped.rest_id);
+      sessionSpliced.delete(dropped.rest_id);
+    }
   }
 
   function removeFromSplicePool(id) {
