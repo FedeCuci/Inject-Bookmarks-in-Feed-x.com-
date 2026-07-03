@@ -43,14 +43,26 @@ async function loadReviveStatus() {
     "feedRevive.likesTemplate",
     "feedRevive.lastRefreshOk",
     "feedRevive.spliceEnabled",
+    "feedRevive.clipQueue",
+    "feedRevive.pendingClips",
+    "feedRevive.backfill",
   ]);
+  const queued = (r["feedRevive.clipQueue"] || []).length;
+  const pending = (r["feedRevive.pendingClips"] || []).length;
+  const clipBits = [];
+  if (queued) clipBits.push(`${queued} clip(s) queued until Obsidian is reachable`);
+  if (pending) clipBits.push(`${pending} bookmark(s) waiting for tweet data`);
+  $("clipQueueInfo").textContent = clipBits.length ? clipBits.join("; ") + "." : "";
   $("splice").checked = r["feedRevive.spliceEnabled"] !== false; // default on
   const stored = r["feedRevive.posts"] || [];
   const count = stored.length;
   const rawCount = stored.filter((p) => p && p.raw).length;
+  const bf = r["feedRevive.backfill"] || {};
+  const bfState = (src) =>
+    bf[src] && bf[src].done ? "history fully backfilled" : "backfilling history";
   const sources = [
-    r["feedRevive.bmTemplate"] && "bookmarks",
-    r["feedRevive.likesTemplate"] && "likes",
+    r["feedRevive.bmTemplate"] && `bookmarks (${bfState("bookmarks")})`,
+    r["feedRevive.likesTemplate"] && `likes (${bfState("likes")})`,
   ]
     .filter(Boolean)
     .join(" + ");

@@ -36,6 +36,12 @@
   const splicePoolIds = new Set();
   const sessionSpliced = new Set(); // don't repeat a tweet until pool exhausted
 
+  // Bookmarked tweets we couldn't clip yet (not in the parse cache when the
+  // CreateBookmark fired). Clipped as soon as their data arrives; the content
+  // script persists them so a pending clip survives page reloads.
+  const pendingClips = new Set();
+  const PENDING_MAX = 100;
+
   const post = (payload) =>
     window.postMessage(
       Object.assign({ __feedRevive: true }, payload),
@@ -276,12 +282,20 @@
     const d = e.data;
     if (!d) return;
     if (d.__feedReviveCmd === "refetchSaved") {
-      refetchSaved(d.source === "likes" ? "likes" : "bookmarks", d.template).catch(() => {});
+      refetchSaved(
+        d.source === "likes" ? "likes" : "bookmarks",
+        d.template,
+        d.cursor || null
+      ).catch(() => {});
     } else if (d.__feedReviveCmd === "splicePool") {
       try {
         spliceEnabled = !!d.enabled;
         if (d.every > 0) spliceEvery = d.every;
         for (const node of d.nodes || []) addToSplicePool(node);
+        for (const id of d.pendingClips || []) {
+          if (typeof id === "string" && pendingClips.size < PENDING_MAX)
+            pendingClips.add(id);
+        }
         if (spliceEnabled && splicePool.length) {
           console.log(
             `[feed-revive] real-tweet splicing armed — ${splicePool.length} tweet(s) in pool`
@@ -410,7 +424,11 @@
 
   // --- Active re-fetch -----------------------------------------------------
 
-  async function refetchSaved(source, template) {
+  // Replays the captured request, paginating up to MAX_PAGES per call.
+  // `startCursor` lets the content script resume a deep-history backfill where
+  // the previous chunk left off; the final cursor (and whether the end of the
+  // list was reached) goes back in refetchDone so it can persist the progress.
+  async function refetchSaved(source, template, startCursor) {
     if (!template || !template.url) return;
     // These endpoints need the session's own authorization header; without it
     // the replay is guaranteed to 401, so don't bother (and say why).
@@ -421,9 +439,10 @@
       post({ channel: "refetchDone", source, total: 0, ok: false });
       return;
     }
-    let cursor = null;
+    let cursor = startCursor || null;
     let total = 0;
     let ok = true;
+    let exhausted = false;
     for (let page = 0; page < MAX_PAGES; page++) {
       let data;
       try {
@@ -449,12 +468,22 @@
         post({ channel: "saved", source, tweets });
         total += tweets.length;
       }
+      // NOTE: a page with zero usable tweets (deleted accounts etc.) is NOT
+      // the end — the cursor still advances. Only a missing/repeated cursor
+      // means we've truly reached the bottom of the list.
       const next = findBottomCursor(data);
-      if (!next || next === cursor || tweets.length === 0) break;
+      if (!next || next === cursor) {
+        exhausted = true;
+        break;
+      }
       cursor = next;
+      // Human-ish pacing between pages; also keeps us clear of rate limits.
+      await sleep(400 + Math.random() * 500);
     }
-    post({ channel: "refetchDone", source, total, ok });
+    post({ channel: "refetchDone", source, total, ok, cursor, exhausted });
   }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   function templateSource(url) {
     if (!url) return null;
@@ -515,31 +544,40 @@
   function handleBookmarkAdded(tweetId) {
     if (!tweetId) return;
     const cached = tweetCache.get(tweetId);
-    if (cached && cached.raw) {
+    if (!cached) {
+      // Never clip a data-less stub (it would write a near-empty note).
+      // Remember the id and clip when the tweet's data arrives — worst case
+      // the next bookmarks refetch includes it, since it IS a bookmark now.
+      rememberPendingClip(tweetId);
+      return;
+    }
+    if (cached.raw) {
       // A just-bookmarked tweet joins the revive pool right away, raw node
       // included, via the normal "saved" channel (persisted by the content
       // script) and the live splice pool.
+      markSaved(cached.raw, "bookmarked");
       addToSplicePool(cached.raw);
       post({ channel: "saved", source: "bookmarks", tweets: [cached] });
     }
-    const clip = Object.assign(
-      {},
-      cached || {
-        id: tweetId,
-        text: "",
-        name: "Tweet",
-        screenName: "",
-        avatar: "",
-        createdAt: "",
-        capturedAt: Date.now(),
-        partial: true,
-      }
-    );
+    postClip(cached);
+  }
+
+  function postClip(cached) {
+    const clip = Object.assign({}, cached);
     delete clip.raw; // the full node is for splicing, not for the Obsidian note
     clip.link = clip.screenName
       ? `https://x.com/${clip.screenName}/status/${clip.id}`
       : `https://x.com/i/status/${clip.id}`;
     post({ channel: "clip", clip });
+  }
+
+  function rememberPendingClip(tweetId) {
+    if (pendingClips.has(tweetId) || pendingClips.size >= PENDING_MAX) return;
+    pendingClips.add(tweetId);
+    post({ channel: "clipPending", id: tweetId });
+    console.log(
+      "[feed-revive] bookmarked tweet not parsed yet — will clip to Obsidian when its data arrives"
+    );
   }
 
   // A like joins the revive pool the same way a bookmark does — but is NOT
@@ -548,9 +586,19 @@
     if (!tweetId) return;
     const cached = tweetCache.get(tweetId);
     if (cached && cached.raw) {
+      markSaved(cached.raw, "favorited");
       addToSplicePool(cached.raw);
       post({ channel: "saved", source: "likes", tweets: [cached] });
     }
+  }
+
+  // A live-saved tweet's snapshot predates the save itself (it came from the
+  // timeline response that rendered it), so its heart/bookmark button would
+  // splice back in un-toggled. Patch the flag we know changed.
+  function markSaved(node, flag) {
+    try {
+      if (node.legacy) node.legacy[flag] = true;
+    } catch (_) {}
   }
 
   // Un-liking / un-bookmarking evicts the tweet so it stops resurfacing.
@@ -571,6 +619,15 @@
       tweetCache.set(t.id, t);
       if (tweetCache.size > CACHE_MAX) {
         tweetCache.delete(tweetCache.keys().next().value);
+      }
+      if (pendingClips.has(t.id)) {
+        // A bookmark we owed a clip for — its data just arrived.
+        pendingClips.delete(t.id);
+        if (t.raw) {
+          addToSplicePool(t.raw);
+          post({ channel: "saved", source: "bookmarks", tweets: [t] });
+        }
+        postClip(t);
       }
     }
 

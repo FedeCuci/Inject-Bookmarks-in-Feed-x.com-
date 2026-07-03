@@ -19,9 +19,14 @@
   };
   const REFRESH_KEY = "feedRevive.lastRefresh";
   const REFRESH_OK_KEY = "feedRevive.lastRefreshOk"; // last *successful* refetch
-  const REFRESH_INTERVAL = 6 * 60 * 60 * 1000; // 6h between background re-fetches
+  const REFRESH_INTERVAL = 6 * 60 * 60 * 1000; // 6h between top-of-list refreshes
+  const BACKFILL_KEY = "feedRevive.backfill"; // per-source deep-history progress
+  const BACKFILL_INTERVAL = 15 * 60 * 1000; // between 25-page backfill chunks
   const SPLICE_KEY = "feedRevive.spliceEnabled"; // real-tweet injection toggle
-  const MAX_STORED = 1000; // cap to keep storage small
+  const PENDING_KEY = "feedRevive.pendingClips"; // bookmark ids awaiting data
+  // ~10-25MB of storage.local at worst (raw nodes are a few KB each) — the
+  // price of having your whole saved history in rotation.
+  const MAX_STORED = 3000;
   // Keep raw nodes (needed for real-tweet splicing) on EVERY stored post —
   // trimming them would silently exclude older saves from ever resurfacing,
   // since splicing replaces the cards entirely. Costs a few MB of
@@ -82,6 +87,16 @@
       if (runtime && runtime.sendMessage) {
         runtime.sendMessage({ type: "clip", clip: d.clip }).catch(() => {});
       }
+      // If this clip was pending (bookmarked before its data arrived), it's
+      // handled now — from here on, delivery retries are the background
+      // script's job.
+      updatePending((ids) => ids.filter((x) => x !== d.clip.id));
+    } else if (d.channel === "clipPending" && d.id) {
+      // Bookmarked, but the tweet's data hasn't been parsed yet — persist the
+      // debt so it survives reloads (resolved by a later parse or refetch).
+      updatePending((ids) =>
+        ids.includes(d.id) ? ids : [...ids, d.id].slice(-100)
+      );
     } else if (d.channel === "spliced" && Array.isArray(d.ids)) {
       // Real tweets went into the timeline — remember them for badging, and
       // stop injecting fallback cards (splicing is clearly working).
@@ -100,18 +115,38 @@
     } else if (d.channel === "refetchDone") {
       const source = d.source || "bookmarks";
       if (d.ok) {
-        log(`background ${source} refresh done — ${d.total} post(s) seen`);
+        log(
+          `background ${source} refresh done — ${d.total} post(s) seen` +
+            (d.exhausted ? " (reached the end of the list)" : "")
+        );
         if (storage) storage.local.set({ [REFRESH_OK_KEY]: Date.now() });
+        updateBackfill(source, (b) => {
+          if (d.exhausted) return { done: true, finishedAt: Date.now() };
+          if (b.done) return b;
+          return Object.assign({}, b, { cursor: d.cursor || null, fails: 0 });
+        });
       } else {
         log(
           `background ${source} refresh failed — if this keeps happening, scroll that page once to re-capture the request`
         );
+        updateBackfill(source, (b) => {
+          if (b.done) return b;
+          const fails = (b.fails || 0) + 1;
+          // A resume cursor can go stale after an X redeploy; restart from
+          // the top after repeated failures rather than retrying it forever.
+          return fails >= 3 ? { fails: 0 } : Object.assign({}, b, { fails });
+        });
       }
     }
   });
 
-  // Trigger a background bookmarks refresh if it's been long enough and we've
-  // captured the request once. (First time, you still scroll /bookmarks once.)
+  // Two background jobs share the replay machinery (first time, you still
+  // have to VISIT /bookmarks and your Likes tab once to capture the requests):
+  //  - BACKFILL: crawls the source's entire history in 25-page chunks,
+  //    resuming from a stored cursor every BACKFILL_INTERVAL, until the end
+  //    of the list is reached or the pool is full. Runs while x.com is open.
+  //  - TOP REFRESH: once backfill is done, re-walks the newest pages every
+  //    REFRESH_INTERVAL to pick up saves made elsewhere (other devices).
   async function maybeRefetch() {
     if (!storage) return;
     const r = await storage.local.get([
@@ -119,31 +154,77 @@
       TEMPLATE_KEYS.likes,
       REFRESH_KEY,
       REFRESH_OK_KEY,
+      BACKFILL_KEY,
     ]);
     if (!r[TEMPLATE_KEYS.bookmarks] && !r[TEMPLATE_KEYS.likes]) return;
-    if (Date.now() - (r[REFRESH_KEY] || 0) < REFRESH_INTERVAL) return;
+    const now = Date.now();
+    const backfill = r[BACKFILL_KEY] || {};
+    const topDue = now - (r[REFRESH_KEY] || 0) >= REFRESH_INTERVAL;
+    let backfillChanged = false;
+    let topRan = false;
+
+    for (const source of Object.keys(TEMPLATE_KEYS)) {
+      const template = r[TEMPLATE_KEYS[source]];
+      if (!template) continue;
+      const b = backfill[source] || {};
+      if (!b.done) {
+        if (posts.size >= MAX_STORED) {
+          backfill[source] = { done: true, reason: "pool-full" };
+          backfillChanged = true;
+          log(`${source} backfill stopped — pool is full (${posts.size} posts)`);
+          continue;
+        }
+        if (now - (b.lastChunk || 0) < BACKFILL_INTERVAL) continue;
+        backfill[source] = Object.assign({}, b, { lastChunk: now });
+        backfillChanged = true;
+        log(`backfilling ${source} history${b.cursor ? " (continuing)" : ""}…`);
+        window.postMessage(
+          { __feedReviveCmd: "refetchSaved", source, template, cursor: b.cursor || null },
+          location.origin
+        );
+      } else if (topDue) {
+        log(`refreshing ${source} in the background…`);
+        window.postMessage(
+          { __feedReviveCmd: "refetchSaved", source, template, cursor: null },
+          location.origin
+        );
+        topRan = true;
+      }
+    }
+
+    if (backfillChanged) storage.local.set({ [BACKFILL_KEY]: backfill });
+    if (topRan) storage.local.set({ [REFRESH_KEY]: now }); // optimistic; avoids spam
     // Refreshes have been *attempted* but haven't succeeded in a long while —
     // the captured requests have probably gone stale (X redeploy). Say so,
     // since otherwise the pool just quietly stops updating.
     const lastOk = r[REFRESH_OK_KEY] || 0;
-    if (lastOk && Date.now() - lastOk > 4 * REFRESH_INTERVAL) {
+    if (lastOk && now - lastOk > 4 * REFRESH_INTERVAL) {
       log(
         "background refresh hasn't succeeded in over a day — scroll your Bookmarks/Likes pages once to re-capture the requests"
       );
     }
-    for (const source of Object.keys(TEMPLATE_KEYS)) {
-      const template = r[TEMPLATE_KEYS[source]];
-      if (!template) continue;
-      log(`refreshing ${source} in the background…`);
-      window.postMessage(
-        { __feedReviveCmd: "refetchSaved", source, template },
-        location.origin
-      );
-    }
-    storage.local.set({ [REFRESH_KEY]: Date.now() }); // optimistic; avoids spam
   }
 
+  // Debounced: a backfill chunk captures ~25 pages in quick succession, and
+  // each would otherwise rewrite the entire (multi-MB) store.
+  let persistTimer = null;
   function persist() {
+    if (!storage || persistTimer) return;
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      persistNow();
+    }, 1500);
+  }
+
+  window.addEventListener("pagehide", () => {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+      persistNow();
+    }
+  });
+
+  function persistNow() {
     if (!storage) return;
     // Keep the most recently captured posts only.
     const all = [...posts.values()]
@@ -164,9 +245,38 @@
     }
   }
 
+  // Serialize read-modify-write of the pending-clip id list. (Two tabs can
+  // still race each other; harmless — worst case a duplicate clip PUT, which
+  // overwrites the same note.)
+  let pendingChain = Promise.resolve();
+  function updatePending(fn) {
+    if (!storage) return;
+    pendingChain = pendingChain.then(async () => {
+      const r = await storage.local.get(PENDING_KEY);
+      const ids = (r && r[PENDING_KEY]) || [];
+      const next = fn(ids);
+      if (next !== ids) await storage.local.set({ [PENDING_KEY]: next });
+    }).catch(() => {});
+  }
+
+  // Same serialized read-modify-write pattern as updatePending, for the
+  // per-source backfill progress ({cursor, lastChunk, fails} or {done: true}).
+  let backfillChain = Promise.resolve();
+  function updateBackfill(source, fn) {
+    if (!storage) return;
+    backfillChain = backfillChain
+      .then(async () => {
+        const r = await storage.local.get(BACKFILL_KEY);
+        const all = (r && r[BACKFILL_KEY]) || {};
+        all[source] = fn(all[source] || {});
+        await storage.local.set({ [BACKFILL_KEY]: all });
+      })
+      .catch(() => {});
+  }
+
   function restore() {
     if (!storage) return;
-    storage.local.get([STORE_KEY, SPLICE_KEY]).then((res) => {
+    storage.local.get([STORE_KEY, SPLICE_KEY, PENDING_KEY]).then((res) => {
       const all = (res && res[STORE_KEY]) || [];
       for (const t of all) if (t && t.id) posts.set(t.id, t);
       if (all.length) log(`restored ${all.length} saved post(s) from storage`);
@@ -175,10 +285,24 @@
       // it's empty (pre-splicing captures), still send `enabled` so live
       // captures this session can start splicing.
       const enabled = res[SPLICE_KEY] !== false; // default on
+      // Snapshots taken before the like/bookmark happened have the button
+      // state un-toggled — we know better: being in the pool with that source
+      // MEANS it's liked/bookmarked. Patch before handing them to X's renderer.
+      for (const t of all) {
+        if (!t || !t.raw || !t.raw.legacy) continue;
+        if (t.source === "likes" || t.source === "both") t.raw.legacy.favorited = true;
+        if (t.source === "bookmarks" || t.source === "both") t.raw.legacy.bookmarked = true;
+      }
       const nodes = all.filter((t) => t && t.raw).map((t) => t.raw).slice(0, RAW_MAX);
       spliceActive = enabled && nodes.length > 0;
       window.postMessage(
-        { __feedReviveCmd: "splicePool", enabled, every: INJECT_EVERY, nodes },
+        {
+          __feedReviveCmd: "splicePool",
+          enabled,
+          every: INJECT_EVERY,
+          nodes,
+          pendingClips: res[PENDING_KEY] || [],
+        },
         location.origin
       );
       if (enabled && !nodes.length && all.length) {
@@ -482,6 +606,9 @@
   function start() {
     restore();
     setTimeout(maybeRefetch, 1500); // let the page settle before refetching
+    // Keep the backfill moving while a tab stays open (chunks are gated by
+    // BACKFILL_INTERVAL, so this re-check is cheap when nothing is due).
+    setInterval(maybeRefetch, 5 * 60 * 1000);
 
     // Re-evaluate on DOM mutations (debounced) and on a steady interval so
     // injections survive SPA navigation and virtualized scrolling.

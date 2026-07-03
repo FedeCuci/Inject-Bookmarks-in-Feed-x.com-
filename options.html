@@ -49,13 +49,19 @@
 
     <label for="folder">Vault folder for clips</label>
     <input type="text" id="folder" placeholder="Twitter" />
-    <p class="hint">Notes are saved as <code>folder/handle-tweetid.md</code>.</p>
+    <p class="hint">
+      Notes match Obsidian Web Clipper's format and are saved as
+      <code>folder/Post by @handle on X &lt;tweetid&gt;.md</code>. Set the
+      folder to your Web Clipper folder (e.g. <code>raw</code>) to keep them
+      together.
+    </p>
 
     <div>
       <button id="save">Save</button>
       <button id="test">Test connection</button>
     </div>
     <div id="status"></div>
+    <p class="hint" id="clipQueueInfo"></p>
 
     <h1 style="margin-top: 32px">Feed revive</h1>
     <div class="row">

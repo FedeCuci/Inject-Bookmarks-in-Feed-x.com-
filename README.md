@@ -29,13 +29,15 @@ A Firefox add-on that does two things with your X (Twitter) activity:
 
 You only have to seed it **once** per source:
 
-- **First time:** open `/bookmarks` (and/or your profile's **Likes** tab) and
-  scroll down once. This passively captures the posts *and* records each
-  request's "signature" (URL + auth).
-- **After that, automatic:** on each visit to x.com, if it's been >6h, the addon
-  **replays** the captured bookmarks/likes requests in the background
-  (same-origin, your cookies, a fresh CSRF token) and paginates through each
-  list — no need to open the pages again.
+- **First time:** just open `/bookmarks` (and/or your profile's **Likes** tab)
+  once — no scrolling needed. This records each request's "signature"
+  (URL + auth) so it can be replayed.
+- **After that, automatic:** while x.com is open, the addon **backfills** your
+  entire bookmarks/likes history in the background — 25 pages per 15-minute
+  chunk (jittered ~0.5s between pages), resuming from a saved cursor until it
+  reaches the end of each list or the pool is full. Once complete, it re-walks
+  the newest pages every 6h to pick up saves made on other devices. All
+  requests are same-origin replays with your cookies and a fresh CSRF token.
 - **Live:** any tweet you bookmark or like is added to the pool immediately;
   un-bookmarking / un-liking removes it.
 
@@ -55,8 +57,20 @@ the moment you bookmark a tweet. When it sees one, it resolves the tweet's
 content (from a small cache of every tweet it has parsed) and hands it to
 `src/background.js`, which `PUT`s a markdown note into your vault using the
 [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api)
-plugin. The note filename is `folder/handle-tweetid.md`, so re-bookmarking the
-same tweet just overwrites it (no duplicates).
+plugin. Notes replicate **Obsidian Web Clipper's** default format (same
+frontmatter: title/source/`[[@handle]]` author/published/created/description/
+`clippings` tag), so auto-clipped bookmarks are indistinguishable from
+manually clipped posts. The filename is `folder/Post by @handle on X
+<tweetid>.md` — the id keeps distinct tweets by one author apart, while
+re-bookmarking the same tweet just overwrites its note (no duplicates).
+
+Two delivery guarantees:
+
+- If the tweet's content isn't in the cache yet, the clip is **deferred** (never
+  written as an empty note) and fires as soon as the data shows up — at the
+  latest, the next background bookmarks refetch.
+- If **Obsidian isn't running**, the clip is queued and retried automatically
+  (every 10 minutes, on the next clip, or when "Test connection" succeeds).
 
 Detection is via the network mutation, not a button click, so it also works when
 you bookmark with the keyboard or from a tweet's detail page.
@@ -80,7 +94,23 @@ you bookmark with the keyboard or from a tweet's detail page.
 2. Click **Load Temporary Add-on…**.
 3. Select this folder's `manifest.json`.
 
-(Temporary add-ons are removed when Firefox restarts. Requires Firefox 128+.)
+(Temporary add-ons are removed when Firefox restarts. Requires Firefox 142+.)
+
+## Release (permanent install via AMO unlisted signing)
+
+The add-on is registered on addons.mozilla.org as **unlisted** (self-
+distribution): every version gets auto-signed by AMO, producing a `.xpi` that
+installs permanently. One-time setup: generate API credentials in the AMO
+Developer Hub ("Manage API Keys") and store them as `WEB_EXT_API_KEY` /
+`WEB_EXT_API_SECRET` environment variables (never commit them).
+
+To ship a new version:
+
+1. Bump `version` in `manifest.json` (AMO rejects duplicate versions).
+2. `npx web-ext sign --channel=unlisted`
+   — lints, uploads, waits for signing, and drops the signed `.xpi` into
+   `web-ext-artifacts/` (gitignored).
+3. Open the `.xpi` in Firefox; it updates in place, storage untouched.
 
 ## Try it / verify
 
@@ -113,6 +143,5 @@ local, single-user use — but you should know it.
 
 ## Roadmap
 
-- Retry queue for clips made while Obsidian is closed.
 - Filters: only-bookmarks vs only-likes, min-age, hide-already-seen.
 - A toolbar popup with capture stats and an on/off toggle.
