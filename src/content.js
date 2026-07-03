@@ -12,16 +12,34 @@
   const storage = ext && ext.storage;
   const runtime = ext && ext.runtime;
   const STORE_KEY = "feedRevive.posts";
-  const TEMPLATE_KEY = "feedRevive.bmTemplate";
+  // Captured request "signatures" for background replay, one per source.
+  const TEMPLATE_KEYS = {
+    bookmarks: "feedRevive.bmTemplate",
+    likes: "feedRevive.likesTemplate",
+  };
   const REFRESH_KEY = "feedRevive.lastRefresh";
+  const REFRESH_OK_KEY = "feedRevive.lastRefreshOk"; // last *successful* refetch
   const REFRESH_INTERVAL = 6 * 60 * 60 * 1000; // 6h between background re-fetches
+  const SPLICE_KEY = "feedRevive.spliceEnabled"; // real-tweet injection toggle
   const MAX_STORED = 1000; // cap to keep storage small
+  // Keep raw nodes (needed for real-tweet splicing) on EVERY stored post —
+  // trimming them would silently exclude older saves from ever resurfacing,
+  // since splicing replaces the cards entirely. Costs a few MB of
+  // storage.local at worst; fine for a personal add-on.
+  const RAW_MAX = MAX_STORED;
+  const SEEN_MAX = 2000; // cap on per-session tweet-order bookkeeping
   const INJECT_EVERY = 20; // one revived post per N real posts
   const log = (...a) => console.log("[feed-revive]", ...a);
 
   // id -> post
   const posts = new Map();
-  let cursor = 0; // round-robins through posts when injecting
+
+  // Real-tweet splicing (the default): the interceptor inserts raw saved
+  // tweets into home timeline payloads and X renders them natively; we only
+  // add the "From your saved posts" badge afterwards. Fallback cards run when
+  // splicing is off or nothing with raw data has been captured yet.
+  let spliceActive = false;
+  const splicedIds = new Set(); // tweet ids the interceptor has spliced in
 
   // --- 1. Capture ----------------------------------------------------------
 
@@ -32,32 +50,63 @@
 
     if (d.channel === "saved" && Array.isArray(d.tweets)) {
       let added = 0;
+      let changed = 0;
       for (const t of d.tweets) {
-        if (t && t.id && !posts.has(t.id)) {
+        if (!t || !t.id) continue;
+        const prev = posts.get(t.id);
+        t.source = d.source;
+        if (!prev) {
           posts.set(t.id, t);
           added++;
+        } else if (!prev.raw && t.raw) {
+          // Re-captured with full tweet data (post predates splicing) — upgrade.
+          t.source = mergeSource(prev.source, d.source);
+          posts.set(t.id, t);
+          changed++;
+        } else if (mergeSource(prev.source, d.source) !== prev.source) {
+          // Seen again from the other source (or from before sources were
+          // recorded) — remember both.
+          prev.source = mergeSource(prev.source, d.source);
+          changed++;
         }
       }
-      if (added) {
+      if (added || changed) {
         log(`captured ${added} new ${d.source} post(s) — ${posts.size} stored total`);
         persist();
       }
     } else if (d.channel === "clip" && d.clip) {
-      // A bookmark was just added — clip it to Obsidian, and also drop it
-      // straight into the revive pool so it can resurface in the feed.
+      // A bookmark was just added — clip it to Obsidian. (The interceptor
+      // separately posts it on the "saved" channel, raw node included, so the
+      // revive pool is handled above.)
       log(`bookmarked @${d.clip.screenName || "?"} — sending to Obsidian`);
       if (runtime && runtime.sendMessage) {
         runtime.sendMessage({ type: "clip", clip: d.clip }).catch(() => {});
       }
-      if (!d.clip.partial && d.clip.id && !posts.has(d.clip.id)) {
-        posts.set(d.clip.id, d.clip);
-        persist();
-      }
+    } else if (d.channel === "spliced" && Array.isArray(d.ids)) {
+      // Real tweets went into the timeline — remember them for badging, and
+      // stop injecting fallback cards (splicing is clearly working).
+      for (const id of d.ids) splicedIds.add(id);
+      spliceActive = true;
     } else if (d.channel === "bmTemplate" && d.template) {
-      // Remember how to replay the bookmarks request for background re-fetch.
-      if (storage) storage.local.set({ [TEMPLATE_KEY]: d.template });
+      // Remember how to replay this source's request for background re-fetch.
+      const key = TEMPLATE_KEYS[d.source] || TEMPLATE_KEYS.bookmarks;
+      if (storage) storage.local.set({ [key]: d.template });
+    } else if (d.channel === "unsaved" && d.id) {
+      // Un-liked or un-bookmarked — stop resurfacing it.
+      if (posts.delete(d.id)) {
+        persist();
+        log("un-saved post removed from the pool");
+      }
     } else if (d.channel === "refetchDone") {
-      log(`background refresh done — ${d.total} bookmark(s) seen`);
+      const source = d.source || "bookmarks";
+      if (d.ok) {
+        log(`background ${source} refresh done — ${d.total} post(s) seen`);
+        if (storage) storage.local.set({ [REFRESH_OK_KEY]: Date.now() });
+      } else {
+        log(
+          `background ${source} refresh failed — if this keeps happening, scroll that page once to re-capture the request`
+        );
+      }
     }
   });
 
@@ -65,15 +114,32 @@
   // captured the request once. (First time, you still scroll /bookmarks once.)
   async function maybeRefetch() {
     if (!storage) return;
-    const r = await storage.local.get([TEMPLATE_KEY, REFRESH_KEY]);
-    const template = r[TEMPLATE_KEY];
-    if (!template) return;
+    const r = await storage.local.get([
+      TEMPLATE_KEYS.bookmarks,
+      TEMPLATE_KEYS.likes,
+      REFRESH_KEY,
+      REFRESH_OK_KEY,
+    ]);
+    if (!r[TEMPLATE_KEYS.bookmarks] && !r[TEMPLATE_KEYS.likes]) return;
     if (Date.now() - (r[REFRESH_KEY] || 0) < REFRESH_INTERVAL) return;
-    log("refreshing bookmarks in the background…");
-    window.postMessage(
-      { __feedReviveCmd: "refetchBookmarks", template },
-      location.origin
-    );
+    // Refreshes have been *attempted* but haven't succeeded in a long while —
+    // the captured requests have probably gone stale (X redeploy). Say so,
+    // since otherwise the pool just quietly stops updating.
+    const lastOk = r[REFRESH_OK_KEY] || 0;
+    if (lastOk && Date.now() - lastOk > 4 * REFRESH_INTERVAL) {
+      log(
+        "background refresh hasn't succeeded in over a day — scroll your Bookmarks/Likes pages once to re-capture the requests"
+      );
+    }
+    for (const source of Object.keys(TEMPLATE_KEYS)) {
+      const template = r[TEMPLATE_KEYS[source]];
+      if (!template) continue;
+      log(`refreshing ${source} in the background…`);
+      window.postMessage(
+        { __feedReviveCmd: "refetchSaved", source, template },
+        location.origin
+      );
+    }
     storage.local.set({ [REFRESH_KEY]: Date.now() }); // optimistic; avoids spam
   }
 
@@ -83,15 +149,43 @@
     const all = [...posts.values()]
       .sort((a, b) => (b.capturedAt || 0) - (a.capturedAt || 0))
       .slice(0, MAX_STORED);
+    // Raw nodes are ~10-50x the size of the normalized fields; keep them only
+    // on the freshest RAW_MAX posts. (Deleting off the shared object also
+    // frees it in the in-memory map — intended.)
+    for (let i = RAW_MAX; i < all.length; i++) {
+      if (all[i].raw) delete all[i].raw;
+    }
     storage.local.set({ [STORE_KEY]: all });
+    // Trim the in-memory pool to the same cap, or it grows for the whole
+    // session while only the stored copy stays bounded.
+    if (posts.size > MAX_STORED) {
+      posts.clear();
+      for (const t of all) posts.set(t.id, t);
+    }
   }
 
   function restore() {
     if (!storage) return;
-    storage.local.get(STORE_KEY).then((res) => {
+    storage.local.get([STORE_KEY, SPLICE_KEY]).then((res) => {
       const all = (res && res[STORE_KEY]) || [];
       for (const t of all) if (t && t.id) posts.set(t.id, t);
       if (all.length) log(`restored ${all.length} saved post(s) from storage`);
+
+      // Arm the interceptor's splice pool with the raw nodes we have. Even if
+      // it's empty (pre-splicing captures), still send `enabled` so live
+      // captures this session can start splicing.
+      const enabled = res[SPLICE_KEY] !== false; // default on
+      const nodes = all.filter((t) => t && t.raw).map((t) => t.raw).slice(0, RAW_MAX);
+      spliceActive = enabled && nodes.length > 0;
+      window.postMessage(
+        { __feedReviveCmd: "splicePool", enabled, every: INJECT_EVERY, nodes },
+        location.origin
+      );
+      if (enabled && !nodes.length && all.length) {
+        log(
+          "stored posts predate real-tweet injection — scroll x.com/i/bookmarks once to re-capture (using fallback cards meanwhile)"
+        );
+      }
     });
   }
 
@@ -100,12 +194,12 @@
   const isHome = () =>
     location.pathname === "/home" || location.pathname === "/";
 
+  // Random rather than round-robin, so old saves surface as often as fresh
+  // ones. (Per-cell stability comes from the `assigned` map, not from here.)
   function pickPost() {
     if (posts.size === 0) return null;
     const values = [...posts.values()];
-    const post = values[cursor % values.length];
-    cursor++;
-    return post;
+    return values[Math.floor(Math.random() * values.length)];
   }
 
   // Stable tweet ordering. X virtualizes the timeline — only a handful of cells
@@ -114,7 +208,22 @@
   // status id and remember the order we first saw it, so "every Nth tweet" stays
   // consistent no matter how the window scrolls.
   const seenOrder = new Map(); // tweetId -> 0-based order first seen
+  const assigned = new Map(); // host tweetId -> revived post id pinned to it
   let seenCount = 0;
+
+  // Sessions on X can be long; drop the oldest half of the bookkeeping once it
+  // grows past SEEN_MAX. Oldest-first (Map preserves insertion order) — those
+  // tweets are the least likely to still be on screen. A pruned tweet that does
+  // reappear just gets a fresh order slot, which only shifts spacing slightly.
+  function pruneSeen() {
+    if (seenOrder.size <= SEEN_MAX) return;
+    let drop = seenOrder.size - SEEN_MAX / 2;
+    for (const id of seenOrder.keys()) {
+      if (drop-- <= 0) break;
+      seenOrder.delete(id);
+      assigned.delete(id);
+    }
+  }
 
   function cellTweetId(cell) {
     const a = cell.querySelector('a[href*="/status/"]');
@@ -129,9 +238,13 @@
   // self-healing: if React re-renders the cell and drops our card, the next
   // pass re-appends it.
   function refreshInjections() {
-    if (!isHome() || posts.size === 0) return;
+    if (!isHome()) return;
     const cells = document.querySelectorAll('[data-testid="cellInnerDiv"]');
     if (!cells.length) return;
+
+    if (splicedIds.size) markSplicedCells(cells);
+    if (spliceActive) return; // real tweets are spliced in — no fallback cards
+    if (posts.size === 0) return;
 
     for (const cell of cells) {
       const id = cellTweetId(cell);
@@ -140,13 +253,46 @@
       if (idx === undefined) {
         idx = seenCount++;
         seenOrder.set(id, idx);
+        pruneSeen();
       }
       if ((idx + 1) % INJECT_EVERY !== 0) continue;
       if (cell.querySelector(":scope > [data-feed-revive]")) continue; // already injected
-      const post = pickPost();
-      if (!post) break;
+      // Reuse the post already pinned to this host tweet, so a React re-render
+      // that drops our card gets the SAME post back instead of the round-robin
+      // shuffling a new one in (which also let one post show up twice).
+      let post = posts.get(assigned.get(id));
+      if (!post) {
+        post = pickPost();
+        if (!post) break;
+        assigned.set(id, post.id);
+      }
       const card = buildCard(post);
       if (card) cell.appendChild(card);
+    }
+  }
+
+  // Spliced tweets are rendered by X itself and are indistinguishable from the
+  // organic feed — prepend the "From your saved posts" badge to their article
+  // so the user can tell. Idempotent; re-runs heal React re-renders, same as
+  // the cards.
+  function markSplicedCells(cells) {
+    for (const cell of cells) {
+      const id = cellTweetId(cell);
+      if (!id || !splicedIds.has(id)) continue;
+      if (cell.querySelector("[data-feed-revive-badge]")) continue;
+      // Prepend to the CELL, not the <article>: the article is a flex
+      // container, so a child div becomes a squeezed flex column beside the
+      // tweet. Cell children lay out as plain blocks (our cards rely on the
+      // same), giving a full-width row above the tweet.
+      const post = posts.get(id);
+      const badge = el("div", "fr-splice-badge");
+      badge.setAttribute("data-feed-revive-badge", "1");
+      badge.style.color = themeColors().secondary;
+      badge.append(
+        badgeIcon(post && post.source),
+        text("span", "fr-badge-text", sourceLabel(post))
+      );
+      cell.prepend(badge);
     }
   }
 
@@ -175,8 +321,8 @@
     // avatar gutter, with the text indented to align with the tweet body below.
     const badge = el("div", "fr-badge");
     badge.append(
-      text("span", "fr-badge-icon", "↩"),
-      text("span", "fr-badge-text", "From your saved posts")
+      badgeIcon(post.source),
+      text("span", "fr-badge-text", sourceLabel(post))
     );
     link.append(badge);
 
@@ -196,6 +342,10 @@
       text("span", "fr-name", post.name),
       text("span", "fr-handle", `@${post.screenName || ""}`)
     );
+    const when = shortDate(post.createdAt);
+    if (when) {
+      head.append(text("span", "fr-handle", "·"), text("span", "fr-handle", when));
+    }
 
     const body = el("div", "fr-body");
     const textNode = text("div", "fr-text", post.text);
@@ -224,6 +374,45 @@
     return wrap;
   }
 
+  // Which list(s) a post came from → badge label. "both" happens when the
+  // same tweet shows up in bookmarks AND likes; missing source means the post
+  // was stored before sources were recorded (self-heals on the next refetch).
+  function mergeSource(a, b) {
+    if (!a || a === b) return b || a;
+    if (!b) return a;
+    return "both";
+  }
+
+  const SOURCE_LABELS = {
+    bookmarks: "From your bookmarks",
+    likes: "From your likes",
+    both: "From your bookmarks & likes",
+  };
+  const sourceLabel = (post) =>
+    (post && SOURCE_LABELS[post.source]) || "From your saved posts";
+
+  // A text glyph (the old ↩) sits on the font baseline inside a taller line
+  // box, so it can never vertically centre against the 13px label — X's native
+  // "reposted" header uses a fixed-size SVG for exactly this reason. Filled
+  // with currentColor so it takes the theme's secondary grey. Bookmark by
+  // default; heart for likes-only posts.
+  const ICON_BOOKMARK =
+    "M6.5 2C5.12 2 4 3.12 4 4.5v18.06l8-5.71 8 5.71V4.5C20 3.12 18.88 2 17.5 2h-11zM6 4.5c0-.28.22-.5.5-.5h11c.28 0 .5.22.5.5v14.56l-6-4.29-6 4.29V4.5z";
+  const ICON_HEART =
+    "M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z";
+
+  function badgeIcon(source) {
+    const wrap = el("span", "fr-badge-icon");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", source === "likes" ? ICON_HEART : ICON_BOOKMARK);
+    svg.append(path);
+    wrap.append(svg);
+    return wrap;
+  }
+
   function el(tag, className) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -233,6 +422,15 @@
     const node = el(tag, className);
     node.textContent = value == null ? "" : String(value);
     return node;
+  }
+
+  // "Jun 5" like X, with the year added once it's not this year's post.
+  function shortDate(s) {
+    const d = new Date(s || "");
+    if (isNaN(d)) return "";
+    const opts = { month: "short", day: "numeric" };
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+    return d.toLocaleDateString("en-US", opts);
   }
 
   // X's design tokens for whichever theme is active, so the card matches native

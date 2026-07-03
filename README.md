@@ -13,29 +13,40 @@ A Firefox add-on that does two things with your X (Twitter) activity:
   When you visit your **Bookmarks** or **Likes** page, X loads those posts via
   its internal GraphQL API — we read those responses as they arrive (no extra
   requests of our own) and hand the posts to the content script.
-- `src/content.js` stores the captured posts (`storage.local`) and injects them
-  into the home timeline, styled to look like native tweets. A `MutationObserver`
-  re-inserts them as X re-renders / virtualizes the feed.
+- **Real-tweet injection (default):** the same hook also *modifies* home
+  timeline responses, splicing the raw saved tweet objects back into the data
+  before X's code sees it — X's own renderer then shows them as fully native
+  tweets (images, video, quote tweets, working buttons). `src/content.js` adds
+  a "From your saved posts" badge after they render. If anything about the
+  payload looks unexpected, we splice nothing and the feed is untouched.
+- **Fallback cards:** with injection disabled (options page), or for posts
+  captured before raw data was stored, `src/content.js` instead rebuilds a
+  simplified text-only card itself and inserts it into the DOM. Posts are
+  persisted in `storage.local` either way; a `MutationObserver` keeps
+  badges/cards present as X re-renders / virtualizes the feed.
 
 ### Keeping the pool fresh
 
-You only have to seed it **once**:
+You only have to seed it **once** per source:
 
-- **First time:** open `/bookmarks` and scroll down once. This passively captures
-  your existing bookmarks *and* records the request "signature" (URL + auth).
+- **First time:** open `/bookmarks` (and/or your profile's **Likes** tab) and
+  scroll down once. This passively captures the posts *and* records each
+  request's "signature" (URL + auth).
 - **After that, automatic:** on each visit to x.com, if it's been >6h, the addon
-  **replays** that bookmarks request in the background (same-origin, your cookies,
-  a fresh CSRF token) and paginates through your whole list — no need to open
-  `/bookmarks` again.
-- **Live:** any tweet you bookmark is added to the pool immediately.
+  **replays** the captured bookmarks/likes requests in the background
+  (same-origin, your cookies, a fresh CSRF token) and paginates through each
+  list — no need to open the pages again.
+- **Live:** any tweet you bookmark or like is added to the pool immediately;
+  un-bookmarking / un-liking removes it.
 
 Captured posts persist in `storage.local`, so they survive browser restarts.
 
 > The first two jobs are purely *passive* (reading what the page fetched). The
 > background re-fetch is *active* (the addon makes its own requests) — more
 > convenient, but more clearly against X's ToS. If the captured query id goes
-> stale (X redeploys), a refetch will fail silently; just scroll `/bookmarks`
-> once to re-capture it.
+> stale (X redeploys), refetches start failing — the options page shows the
+> last successful refresh, and the console nags after ~a day of failures; just
+> scroll `/bookmarks` once to re-capture it.
 
 ### Clip to Obsidian
 
@@ -78,8 +89,9 @@ you bookmark with the keyboard or from a tweet's detail page.
    bit. You should see console logs like:
    `[feed-revive] captured 18 new bookmarks post(s) — 18 stored total`
    → *This verifies data capture (slice 1).*
-3. Go to **Home** (`x.com/home`) and scroll. Every ~5 posts you should see a
-   card badged **"↩ From your saved posts"**.
+3. Go to **Home** (`x.com/home`) and scroll. Roughly every 20 posts you should
+   see a revived tweet badged **"From your bookmarks"** / **"From your likes"**
+   (bookmark/heart icon).
    → *This verifies injection (slice 2).*
 
 ## Known fragilities

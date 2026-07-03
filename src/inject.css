@@ -44,14 +44,19 @@
 
 .feed-revive-card .fr-badge-icon {
   /* Same width as the avatar column so the icon sits in the gutter and the
-     label aligns with the name/text below it (40px avatar + 12px row gap). */
+     label aligns with the name/text below it (40px avatar + 12px row gap).
+     A flexed SVG (not a text glyph) so it centres exactly against the label —
+     glyphs sit on the font baseline and ride high. */
   flex: 0 0 40px;
-  text-align: right;
-  font-size: 15px;
-  /* The ↩ is a text glyph, not a filled SVG like X's retweet icon, so
-     font-weight can't bolden it — stroke its outline in its own colour to give
-     it the same heavy weight as the native icon. */
-  -webkit-text-stroke: 0.6px currentColor;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.feed-revive-card .fr-badge-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
 }
 
 .feed-revive-card .fr-row {
@@ -115,4 +120,37 @@
 
 .feed-revive-card .fr-more:hover {
   text-decoration: underline;
+}
+
+/* Badge prepended to REAL tweets spliced into the timeline (first child of
+   the cell, above the <article> — the article is flex and would squeeze us
+   into a column). Same look as the card badge, but self-contained because the
+   .fr-badge rules above are scoped to .feed-revive-card. 16px side padding
+   matches the tweet gutter; the small negative bottom margin tightens the gap
+   to the article's own top padding. */
+.fr-splice-badge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px 0;
+  margin-bottom: -4px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 16px;
+  color: rgb(113, 118, 123); /* overridden inline with the live theme colour */
+  font-family: "TwitterChirp", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, Helvetica, Arial, sans-serif;
+}
+
+.fr-splice-badge .fr-badge-icon {
+  flex: 0 0 40px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.fr-splice-badge .fr-badge-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
 }

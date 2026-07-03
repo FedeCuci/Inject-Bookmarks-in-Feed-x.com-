@@ -31,10 +31,51 @@ async function load() {
   $("baseUrl").value = s.baseUrl;
   $("apiKey").value = s.apiKey;
   $("folder").value = s.folder;
+  loadReviveStatus();
+}
+
+// Surface whether the background bookmarks refresh is actually working — its
+// failures otherwise only show up in the x.com console.
+async function loadReviveStatus() {
+  const r = await ext.storage.local.get([
+    "feedRevive.posts",
+    "feedRevive.bmTemplate",
+    "feedRevive.likesTemplate",
+    "feedRevive.lastRefreshOk",
+    "feedRevive.spliceEnabled",
+  ]);
+  $("splice").checked = r["feedRevive.spliceEnabled"] !== false; // default on
+  const stored = r["feedRevive.posts"] || [];
+  const count = stored.length;
+  const rawCount = stored.filter((p) => p && p.raw).length;
+  const sources = [
+    r["feedRevive.bmTemplate"] && "bookmarks",
+    r["feedRevive.likesTemplate"] && "likes",
+  ]
+    .filter(Boolean)
+    .join(" + ");
+  let refresh;
+  if (!sources) {
+    refresh =
+      "Background refresh not set up yet — open x.com/i/bookmarks and your profile's Likes tab, and scroll each once.";
+  } else if (r["feedRevive.lastRefreshOk"]) {
+    refresh =
+      `Background refresh armed for ${sources}. Last success: ` +
+      new Date(r["feedRevive.lastRefreshOk"]).toLocaleString() +
+      ".";
+  } else {
+    refresh = `Background refresh armed for ${sources}, but none has succeeded yet.`;
+  }
+  $("reviveStatus").textContent =
+    `${count} post(s) in the revive pool, ${rawCount} with full tweet data ` +
+    `for real-tweet injection. ${refresh}`;
 }
 
 $("save").addEventListener("click", async () => {
-  await ext.storage.local.set({ [SETTINGS_KEY]: readForm() });
+  await ext.storage.local.set({
+    [SETTINGS_KEY]: readForm(),
+    "feedRevive.spliceEnabled": $("splice").checked,
+  });
   setStatus("Saved.", "ok");
 });
 

@@ -57,6 +57,19 @@
     </div>
     <div id="status"></div>
 
+    <h1 style="margin-top: 32px">Feed revive</h1>
+    <div class="row">
+      <input type="checkbox" id="splice" />
+      <label for="splice">Inject saved posts as real tweets</label>
+    </div>
+    <p class="hint">
+      Splices your saved posts into the home timeline data so X renders them
+      natively — images, video and buttons all work. If your feed ever
+      misbehaves after an X update, turn this off to fall back to simplified
+      text-only cards.
+    </p>
+    <p class="hint" id="reviveStatus">…</p>
+
     <script src="options.js"></script>
   </body>
 </html>
