@@ -185,7 +185,8 @@
       } else if (topDue) {
         log(`refreshing ${source} in the background…`);
         window.postMessage(
-          { __feedReviveCmd: "refetchSaved", source, template, cursor: null },
+          // stopOnKnown: a no-news maintenance check costs one request.
+          { __feedReviveCmd: "refetchSaved", source, template, cursor: null, stopOnKnown: true },
           location.origin
         );
         topRan = true;

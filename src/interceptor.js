@@ -285,7 +285,8 @@
       refetchSaved(
         d.source === "likes" ? "likes" : "bookmarks",
         d.template,
-        d.cursor || null
+        d.cursor || null,
+        !!d.stopOnKnown
       ).catch(() => {});
     } else if (d.__feedReviveCmd === "splicePool") {
       try {
@@ -428,7 +429,10 @@
   // `startCursor` lets the content script resume a deep-history backfill where
   // the previous chunk left off; the final cursor (and whether the end of the
   // list was reached) goes back in refetchDone so it can persist the progress.
-  async function refetchSaved(source, template, startCursor) {
+  // `stopOnKnown` (maintenance mode, after backfill): stop paginating at the
+  // first page with no unseen tweets — everything deeper is already pooled,
+  // so a no-news check costs a single request instead of 25.
+  async function refetchSaved(source, template, startCursor, stopOnKnown) {
     if (!template || !template.url) return;
     // These endpoints need the session's own authorization header; without it
     // the replay is guaranteed to 401, so don't bother (and say why).
@@ -463,11 +467,14 @@
         break;
       }
       const tweets = extractTweets(data);
+      // Must be computed BEFORE addToSplicePool marks them all as known.
+      const unseen = tweets.filter((t) => !splicePoolIds.has(t.id)).length;
       if (tweets.length) {
         for (const t of tweets) addToSplicePool(t.raw); // refetches feed the pool too
         post({ channel: "saved", source, tweets });
         total += tweets.length;
       }
+      if (stopOnKnown && tweets.length && unseen === 0) break; // caught up
       // NOTE: a page with zero usable tweets (deleted accounts etc.) is NOT
       // the end — the cursor still advances. Only a missing/repeated cursor
       // means we've truly reached the bottom of the list.

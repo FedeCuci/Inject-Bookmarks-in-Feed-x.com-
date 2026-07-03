@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Feed Revive",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Re-surfaces your liked and bookmarked X posts back into your home timeline so you see them again.",
   "browser_specific_settings": {
     "gecko": {
