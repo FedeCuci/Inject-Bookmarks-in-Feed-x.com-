@@ -13,7 +13,7 @@
       }
       h1 { font-size: 18px; }
       label { display: block; margin-top: 14px; font-weight: 600; }
-      input[type="text"], input[type="password"] {
+      input[type="text"], input[type="password"], select {
         width: 100%;
         padding: 8px;
         margin-top: 4px;
@@ -73,6 +73,21 @@
       natively — images, video and buttons all work. If your feed ever
       misbehaves after an X update, turn this off to fall back to simplified
       text-only cards.
+    </p>
+
+    <label for="likesOrder">Likes page order</label>
+    <select id="likesOrder">
+      <option value="default">X default (most recently liked)</option>
+      <option value="newest">Newest posts first</option>
+      <option value="oldest">Oldest posts first</option>
+      <option value="random">Random</option>
+    </select>
+    <p class="hint">
+      Sorts your Likes page globally across your captured likes history (the
+      revive pool): as you scroll, each batch X loads is refilled from the
+      sorted list, so it's one continuous order — not a per-batch shuffle.
+      Falls back to reordering just the current batch until enough history
+      has been captured (~50 posts).
     </p>
     <p class="hint" id="reviveStatus">…</p>
 

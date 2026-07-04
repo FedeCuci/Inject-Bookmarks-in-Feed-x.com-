@@ -23,6 +23,7 @@
   const BACKFILL_KEY = "feedRevive.backfill"; // per-source deep-history progress
   const BACKFILL_INTERVAL = 15 * 60 * 1000; // between 25-page backfill chunks
   const SPLICE_KEY = "feedRevive.spliceEnabled"; // real-tweet injection toggle
+  const LIKES_ORDER_KEY = "feedRevive.likesOrder"; // likes-page sort override
   const PENDING_KEY = "feedRevive.pendingClips"; // bookmark ids awaiting data
   // ~10-25MB of storage.local at worst (raw nodes are a few KB each) — the
   // price of having your whole saved history in rotation.
@@ -287,7 +288,7 @@
 
   function restore() {
     if (!storage) return;
-    storage.local.get([STORE_KEY, SPLICE_KEY, PENDING_KEY]).then((res) => {
+    storage.local.get([STORE_KEY, SPLICE_KEY, PENDING_KEY, LIKES_ORDER_KEY]).then((res) => {
       const all = (res && res[STORE_KEY]) || [];
       for (const t of all) if (t && t.id) posts.set(t.id, t);
       if (all.length) log(`restored ${all.length} saved post(s) from storage`);
@@ -323,6 +324,7 @@
               every: INJECT_EVERY,
               nodes: batch,
               pendingClips: idx === 0 ? res[PENDING_KEY] || [] : [],
+              likesOrder: idx === 0 ? res[LIKES_ORDER_KEY] || "default" : undefined,
             },
             location.origin
           );
@@ -633,6 +635,21 @@
 
   function start() {
     restore();
+    // Live-forward likes-order changes from the options page, so a new sort
+    // applies on the next Likes fetch without reloading x.com. (Already-
+    // rendered tweets keep their order until the page is revisited.)
+    if (storage && storage.onChanged) {
+      storage.onChanged.addListener((changes, area) => {
+        if (area !== "local" || !changes[LIKES_ORDER_KEY]) return;
+        window.postMessage(
+          {
+            __feedReviveCmd: "setLikesOrder",
+            order: changes[LIKES_ORDER_KEY].newValue || "default",
+          },
+          location.origin
+        );
+      });
+    }
     setTimeout(maybeRefetch, 1500); // let the page settle before refetching
     // Keep the backfill moving while a tab stays open (chunks are gated by
     // BACKFILL_INTERVAL, so this re-check is cheap when nothing is due).

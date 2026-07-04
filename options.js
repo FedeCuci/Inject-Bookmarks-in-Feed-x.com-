@@ -43,6 +43,7 @@ async function loadReviveStatus() {
     "feedRevive.likesTemplate",
     "feedRevive.lastRefreshOk",
     "feedRevive.spliceEnabled",
+    "feedRevive.likesOrder",
     "feedRevive.clipQueue",
     "feedRevive.pendingClips",
     "feedRevive.backfill",
@@ -54,6 +55,7 @@ async function loadReviveStatus() {
   if (pending) clipBits.push(`${pending} bookmark(s) waiting for tweet data`);
   $("clipQueueInfo").textContent = clipBits.length ? clipBits.join("; ") + "." : "";
   $("splice").checked = r["feedRevive.spliceEnabled"] !== false; // default on
+  $("likesOrder").value = r["feedRevive.likesOrder"] || "default";
   const stored = r["feedRevive.posts"] || [];
   const count = stored.length;
   const rawCount = stored.filter((p) => p && p.raw).length;
@@ -87,6 +89,7 @@ $("save").addEventListener("click", async () => {
   await ext.storage.local.set({
     [SETTINGS_KEY]: readForm(),
     "feedRevive.spliceEnabled": $("splice").checked,
+    "feedRevive.likesOrder": $("likesOrder").value,
   });
   setStatus("Saved.", "ok");
 });

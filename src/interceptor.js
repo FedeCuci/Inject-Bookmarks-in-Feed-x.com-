@@ -19,6 +19,7 @@
   if (!origFetch || origFetch.__feedReviveWrapped) return;
 
   const SAVED_RE = [/\/Bookmarks\b/, /\/Likes\b/];
+  const LIKES_RE = /\/Likes\b/;
   const HOME_RE = /\/(HomeTimeline|HomeLatestTimeline)\b/;
   const CACHE_MAX = 500;
   const MAX_PAGES = 25; // re-fetch pagination safety cap
@@ -32,6 +33,9 @@
   // captures) plus anything parsed live this session.
   let spliceEnabled = false;
   let spliceEvery = 20; // one spliced tweet per N real timeline entries
+  // Likes-page reordering: "default" (X's like-time order), "newest",
+  // "oldest" (by tweet date) or "random". Applies per response page.
+  let likesOrder = "default";
   const POOL_MAX = 3000; // keep in sync with content.js MAX_STORED
   const splicePool = []; // raw Tweet nodes, oldest-added first
   const splicePoolIds = new Set();
@@ -96,6 +100,23 @@
             const data = await response.clone().json();
             processGraphql(url, data);
             if (spliceTimeline(data)) {
+              return new Response(JSON.stringify(data), {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers,
+              });
+            }
+          } catch (_) {}
+          return response;
+        }
+        if (LIKES_RE.test(url) && likesOrder !== "default") {
+          // Likes page with a sort override: reorder the payload's tweet
+          // entries and hand X a rebuilt Response. Failures fall through to
+          // the untouched original.
+          try {
+            const data = await response.clone().json();
+            processGraphql(url, data);
+            if (transformTimeline(url, data)) {
               return new Response(JSON.stringify(data), {
                 status: response.status,
                 statusText: response.statusText,
@@ -249,13 +270,18 @@
 
   function shouldSpliceXhr(xhr) {
     const info = xhr.__feedRevive;
-    return (
-      spliceEnabled &&
-      splicePool.length > 0 &&
-      info &&
-      HOME_RE.test(info.url) &&
-      xhr.readyState === 4
-    );
+    if (!info || xhr.readyState !== 4) return false;
+    if (spliceEnabled && splicePool.length > 0 && HOME_RE.test(info.url)) return true;
+    if (likesOrder !== "default" && LIKES_RE.test(info.url)) return true;
+    return false;
+  }
+
+  // Route an intercepted timeline payload to the right mutation for its URL.
+  // Returns true if the payload was changed.
+  function transformTimeline(url, data) {
+    if (HOME_RE.test(url)) return spliceTimeline(data);
+    if (LIKES_RE.test(url)) return reorderLikesTimeline(url, data);
+    return false;
   }
 
   function spliceXhrText(xhr, real) {
@@ -271,7 +297,7 @@
         processGraphql(info.url, data);
       } catch (_) {}
       info.processed = true;
-      if (spliceTimeline(data)) out = JSON.stringify(data);
+      if (transformTimeline(info.url, data)) out = JSON.stringify(data);
     } catch (_) {}
     info.splicedText = out;
     return out;
@@ -283,7 +309,7 @@
     if (!real || !shouldSpliceXhr(xhr)) return real;
     info.splicedJson = true; // parsed object is shared — mutate it once
     try {
-      spliceTimeline(real);
+      transformTimeline(info.url, real);
     } catch (_) {}
     return real;
   }
@@ -300,9 +326,15 @@
         d.cursor || null,
         !!d.stopOnKnown
       ).catch(() => {});
+    } else if (d.__feedReviveCmd === "setLikesOrder") {
+      if (typeof d.order === "string") {
+        likesOrder = d.order;
+        resetLikesSeq(); // new order → new sequence on the next Likes page
+      }
     } else if (d.__feedReviveCmd === "splicePool") {
       try {
         spliceEnabled = !!d.enabled;
+        if (typeof d.likesOrder === "string") likesOrder = d.likesOrder;
         if (d.every > 0) spliceEvery = d.every;
         for (const node of d.nodes || []) addToSplicePool(node);
         for (const id of d.pendingClips || []) {
@@ -349,14 +381,6 @@
     const entries = findAddEntries(data);
     if (!entries) return false;
 
-    const isTweetEntry = (e) =>
-      e &&
-      typeof e.entryId === "string" &&
-      e.content &&
-      e.content.entryType === "TimelineTimelineItem" &&
-      e.content.itemContent &&
-      e.content.itemContent.itemType === "TimelineTweet";
-
     // Every tweet id already in this payload (including inside conversation
     // modules) — never splice a duplicate next to the organic copy.
     const present = new Set();
@@ -389,6 +413,193 @@
       console.log(`[feed-revive] spliced ${splicedIds.length} saved tweet(s) into the timeline`);
     }
     return splicedIds.length > 0;
+  }
+
+  const isTweetEntry = (e) =>
+    e &&
+    typeof e.entryId === "string" &&
+    e.content &&
+    e.content.entryType === "TimelineTimelineItem" &&
+    e.content.itemContent &&
+    e.content.itemContent.itemType === "TimelineTweet";
+
+  // --- Global likes ordering -------------------------------------------------
+  //
+  // The pool already holds the captured likes history in memory, so a GLOBAL
+  // sort costs nothing extra: on the first Likes page we snapshot the liked
+  // nodes in the requested order, then fill each page's tweet slots from that
+  // sequence as X paginates (cursors and slot sortIndexes stay untouched).
+  // When the sequence runs out — history longer than the pool cap — organic
+  // entries pass through, minus any tweet we already showed. With too little
+  // history captured, fall back to the per-page reorder.
+
+  const MIN_GLOBAL_SEQ = 50; // below this a "global" sort adds nothing
+
+  let likesSeq = null; // ordered snapshot of liked raw nodes for this visit
+  let likesSeqPos = 0;
+  const likesShown = new Set(); // ids already delivered this visit
+
+  function resetLikesSeq() {
+    likesSeq = null;
+    likesSeqPos = 0;
+    likesShown.clear();
+  }
+
+  function buildLikesSeq() {
+    // favorited covers every path into the pool: Likes-page captures carry it
+    // from X, and live likes / restored posts get it patched by source.
+    const liked = splicePool.filter((n) => n.legacy && n.legacy.favorited);
+    if (likesOrder === "random") {
+      for (let i = liked.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [liked[i], liked[j]] = [liked[j], liked[i]];
+      }
+    } else {
+      const dir = likesOrder === "oldest" ? 1n : -1n;
+      liked.sort((a, b) => {
+        const d = (nodeSortKey(a) - nodeSortKey(b)) * dir;
+        return d < 0n ? -1 : d > 0n ? 1 : 0;
+      });
+    }
+    likesSeq = liked;
+    likesSeqPos = 0;
+    likesShown.clear();
+  }
+
+  function nextLikesNode() {
+    while (likesSeq && likesSeqPos < likesSeq.length) {
+      const node = likesSeq[likesSeqPos++];
+      if (!likesShown.has(node.rest_id)) return node;
+    }
+    return null;
+  }
+
+  function reorderLikesTimeline(url, data) {
+    if (likesOrder === "default") return false;
+    if (isFirstLikesPage(url)) resetLikesSeq(); // revisit → fresh sequence
+    if (!likesSeq) buildLikesSeq();
+    if (likesSeq.length < MIN_GLOBAL_SEQ) return sortLikesTimeline(data);
+
+    const entries = findAddEntries(data);
+    if (!entries) return false;
+    let replaced = 0;
+    let dropped = 0;
+    const out = [];
+    for (const e of entries) {
+      if (!isTweetEntry(e)) {
+        out.push(e); // cursors/modules keep their slots
+        continue;
+      }
+      const node = nextLikesNode();
+      if (node) {
+        const entry = makeEntry(node, e);
+        // Keep the organic slot's exact sortIndex: X sorts by it, and the
+        // organic values are already correct for this pagination window.
+        if (e.sortIndex !== undefined) entry.sortIndex = e.sortIndex;
+        likesShown.add(node.rest_id);
+        out.push(entry);
+        replaced++;
+      } else {
+        // Sequence exhausted — organic passthrough, minus already-shown.
+        const id = organicTweetId(e);
+        if (id && likesShown.has(id)) {
+          dropped++;
+          continue;
+        }
+        if (id) likesShown.add(id);
+        out.push(e);
+      }
+    }
+    if (!replaced && !dropped) return false;
+    entries.length = 0;
+    Array.prototype.push.apply(entries, out);
+    console.log(
+      `[feed-revive] likes page rebuilt (${likesOrder}: ${replaced} from global order` +
+        (dropped ? `, ${dropped} duplicate(s) dropped` : "") +
+        `)`
+    );
+    return true;
+  }
+
+  function organicTweetId(entry) {
+    try {
+      let node = entry.content.itemContent.tweet_results.result;
+      if (node && node.tweet) node = node.tweet; // TweetWithVisibilityResults
+      return node.rest_id;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function nodeSortKey(node) {
+    try {
+      return BigInt(node.rest_id); // snowflake ids are chronological
+    } catch (_) {
+      return 0n;
+    }
+  }
+
+  // First page of a Likes visit = request without a pagination cursor.
+  function isFirstLikesPage(url) {
+    try {
+      const u = new URL(url, location.href);
+      const vars = JSON.parse(u.searchParams.get("variables") || "{}");
+      return !vars.cursor;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Reorder a Likes page's tweet entries in place per `likesOrder` (mutates
+  // `data`). Only the tweet entries swap positions — cursors and modules keep
+  // their slots — and the original sortIndex sequence is reassigned in array
+  // order, since X sorts by sortIndex rather than trusting array order.
+  // Fallback for when too little history is captured for the global sort.
+  // Same contract as spliceTimeline: anything unexpected means "change
+  // nothing", never "break the page".
+  function sortLikesTimeline(data) {
+    if (likesOrder === "default") return false;
+    const entries = findAddEntries(data);
+    if (!entries) return false;
+    const slots = [];
+    for (let i = 0; i < entries.length; i++) {
+      if (isTweetEntry(entries[i])) slots.push(i);
+    }
+    if (slots.length < 2) return false;
+
+    const tweets = slots.map((i) => entries[i]);
+    if (likesOrder === "random") {
+      for (let i = tweets.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [tweets[i], tweets[j]] = [tweets[j], tweets[i]];
+      }
+    } else {
+      const dir = likesOrder === "oldest" ? 1n : -1n;
+      tweets.sort((a, b) => {
+        const d = (tweetSortKey(a) - tweetSortKey(b)) * dir;
+        return d < 0n ? -1 : d > 0n ? 1 : 0;
+      });
+    }
+
+    const sortIndexes = slots.map((i) => entries[i].sortIndex);
+    slots.forEach((slot, k) => {
+      entries[slot] = tweets[k];
+      if (sortIndexes[k] !== undefined) entries[slot].sortIndex = sortIndexes[k];
+    });
+    console.log(`[feed-revive] likes page reordered (${likesOrder}, ${tweets.length} tweets)`);
+    return true;
+  }
+
+  // Tweet snowflake ids are chronological, so the id doubles as a post-date
+  // sort key — no date parsing needed. Unknown shapes sort as 0 (oldest).
+  function tweetSortKey(entry) {
+    try {
+      let node = entry.content.itemContent.tweet_results.result;
+      if (node && node.tweet) node = node.tweet; // TweetWithVisibilityResults
+      return BigInt(node.rest_id);
+    } catch (_) {
+      return 0n;
+    }
   }
 
   // The instructions live at data.home.home_timeline_urt.instructions today,
